@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+import json
+import urllib.request
+from datetime import datetime, timedelta, timezone
+import os
+import sys
+import time
+
+# 设置时区为北京时间
+os.environ['TZ'] = 'Asia/Shanghai'
+
+# ========== 配置区域开始 ==========
+# 企业微信群webhook地址 - 从环境变量获取
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+
+# 测试模式 - 从环境变量获取，正确处理布尔值
+TEST_MODE_STR = os.getenv('TEST_MODE', 'false')
+TEST_MODE = TEST_MODE_STR.lower() == 'true'
+
+# 测试日期 - 支持从环境变量获取自定义测试日期
+CUSTOM_TEST_DATE = os.getenv('TEST_DATE')
+if CUSTOM_TEST_DATE and CUSTOM_TEST_DATE.strip():
+    TEST_DATE = CUSTOM_TEST_DATE.strip()
+else:
+    TEST_DATE = "2025-11-04"  # 默认测试日期
+
+# 新增等待配置
+WAIT_ENABLED = os.getenv('WAIT_ENABLED', 'true').lower() == 'true'
+TARGET_HOUR = int(os.getenv('TARGET_HOUR', '8'))      # 目标小时
+TARGET_MINUTE = int(os.getenv('TARGET_MINUTE', '59')) # 目标分钟
+
+# 北京时区偏移 (UTC+8)
+BEIJING_OFFSET = timedelta(hours=8)
+BEIJING_TZ = timezone(BEIJING_OFFSET)
+
+# 从环境变量获取各组成员手机号
+def get_group_members_from_env():
+    """从环境变量获取各组成员手机号配置"""
+    groups = {}
+    for i in range(1, 5):  # group1 到 group4
+        env_var_name = f"GROUP{i}_MEMBERS"
+        members_str = os.getenv(env_var_name, "")
+        
+        if members_str:
+            # 支持逗号分隔的手机号
+            members = [phone.strip() for phone in members_str.split(',') if phone.strip()]
+            groups[f"group{i}"] = members
+            print(f"从环境变量加载 group{i}: {len(members)} 个成员")
+        else:
+            groups[f"group{i}"] = []
+            print(f"警告: 环境变量 {env_var_name} 未设置")
+    
+    return groups
+
+# 获取各组成员手机号配置
+GROUP_MEMBERS = get_group_members_from_env()
+
+print(f"=== 调试信息 ===")
+print(f"WEBHOOK_URL: {'已设置' if WEBHOOK_URL and WEBHOOK_URL != '你的webhook_url' else '未设置'}")
+print(f"TEST_MODE: {TEST_MODE}")
+print(f"TEST_DATE: {TEST_DATE}")
+print(f"WAIT_ENABLED: {WAIT_ENABLED}")
+print(f"TARGET_TIME: {TARGET_HOUR:02d}:{TARGET_MINUTE:02d} (北京时间)")
+print(f"各组成员数: group1={len(GROUP_MEMBERS.get('group1', []))}, "
+      f"group2={len(GROUP_MEMBERS.get('group2', []))}, "
+      f"group3={len(GROUP_MEMBERS.get('group3', []))}, "
+      f"group4={len(GROUP_MEMBERS.get('group4', []))}")
+print(f"=================")
+
+# 轮班顺序
+SHIFT_SCHEDULE = ["group1", "group2", "group3", "group4"]
+
+# 轮班开始日期
+SHIFT_START_DATE = "2024-01-01"
+# ========== 配置区域结束 ==========
+
+
+class TimeWaiter:
+    """时间等待器（使用标准库）"""
+    
+    def wait_until_target_time(self, target_hour, target_minute=0):
+        """
+        等待直到目标时间（北京时间）
+        """
+        if not WAIT_ENABLED:
+            print("等待功能已禁用，立即执行")
+            return
+        
+        if TEST_MODE:
+            print("测试模式下跳过等待")
+            return
+            
+        print(f"=== 开始等待目标时间 {target_hour:02d}:{target_minute:02d} ===")
+        
+        # 获取当前UTC时间并转换为北京时间
+        utc_now = datetime.now(timezone.utc)
+        beijing_now = utc_now.astimezone(BEIJING_TZ)
+        
+        # 构建目标时间（北京时间今天）
+        target_time = datetime(
+            beijing_now.year, beijing_now.month, beijing_now.day,
+            target_hour, target_minute, 0, tzinfo=BEIJING_TZ
+        )
+        
+        # 如果当前时间已经超过目标时间，立即执行而不等待
+        if beijing_now >= target_time:
+            print("当前时间已超过或等于目标时间，立即执行！")
+            return
+        
+        # 计算需要等待的秒数
+        wait_seconds = (target_time - beijing_now).total_seconds()
+        
+        print(f"当前时间(北京): {beijing_now.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"目标时间(北京): {target_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"需要等待: {wait_seconds:.0f} 秒")
+        
+        # 如果不需要等待（已经超过目标时间）
+        if wait_seconds <= 0:
+            print("到达目标时间，开始执行任务！")
+            return
+        
+        # 分段等待，最长等待60秒然后检查
+        while wait_seconds > 0:
+            sleep_time = min(60, max(1, wait_seconds))
+            print(f"等待 {sleep_time:.0f} 秒...")
+            time.sleep(sleep_time)
+            wait_seconds -= sleep_time
+            
+            # 更新当前时间
+            utc_now = datetime.now(timezone.utc)
+            beijing_now = utc_now.astimezone(BEIJING_TZ)
+            print(f"当前时间(北京): {beijing_now.strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            if wait_seconds <= 0:
+                print("到达目标时间，开始执行任务！")
+                break
+
+
+# ... [保持其他类不变，只需要修改 ShiftManager 类的 get_group_members 方法] ...
+
+
+class ShiftManager:
+    """班次管理器"""
+
+    def __init__(self, shift_schedule, start_date):
+        self.shift_schedule = shift_schedule
+        self.start_date = datetime.strptime(start_date, "%Y-%m-%d")
+
+    def get_current_shift_group(self, current_date):
+        """计算今天值班的组"""
+        # 确保日期对象是朴素的（无时区）用于计算
+        if current_date.tzinfo is not None:
+            current_date_naive = current_date.replace(tzinfo=None)
+        else:
+            current_date_naive = current_date
+            
+        days_passed = (current_date_naive - self.start_date).days
+        shift_index = days_passed % len(self.shift_schedule)
+        return self.shift_schedule[shift_index]
+
+    def get_group_members(self, group_name):
+        """获取全组成员手机号 - 从环境变量配置中获取"""
+        return GROUP_MEMBERS.get(group_name, [])
+
+
+# ... [保持其他类不变] ...
