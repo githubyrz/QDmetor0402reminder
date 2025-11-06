@@ -86,6 +86,6 @@ jobs:
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: morning-reminder-execution-${{ github.run_id }}
-        path: morning_reminder_output.txt
+        name: morning-execution-${{ github.run_id }}
+        path: morning_output.txt
         retention-days: 7
