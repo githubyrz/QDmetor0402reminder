@@ -317,7 +317,7 @@ class MorningMessageComposer:
         else:
             display_date = current_date
             
-        title = f"工作提醒 {display_date.strftime('%m月%d日')}"
+        title = f"Github定时延迟版工作提醒 {display_date.strftime('%m月%d日')}"
 
         if TEST_MODE:
             title += " [测试模式]"
