@@ -27,7 +27,7 @@ else:
 # 新增等待配置
 WAIT_ENABLED = os.getenv('WAIT_ENABLED', 'true').lower() == 'true'
 TARGET_HOUR = int(os.getenv('TARGET_HOUR', '8'))      # 目标小时
-TARGET_MINUTE = int(os.getenv('TARGET_MINUTE', '59')) # 目标分钟
+TARGET_MINUTE = int(os.getenv('TARGET_MINUTE', '0')) # 目标分钟
 
 # 北京时区偏移 (UTC+8)
 BEIJING_OFFSET = timedelta(hours=8)
