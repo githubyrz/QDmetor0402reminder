@@ -3,7 +3,7 @@ name: Morning Reminder
 on:
   schedule:
     # 提前5分钟触发，避开整点排队
-    - cron: '58 0 * * *'  # 每天 UTC时间0:54 (北京时间8:54)
+    - cron: '57 0 * * *'  # 每天 UTC时间0:54 (北京时间8:54)
 
   workflow_dispatch:  # 允许手动触发
     inputs:
