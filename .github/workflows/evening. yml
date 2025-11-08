@@ -1,0 +1,91 @@
+name: Evening Reminder
+
+on:
+  schedule:
+    # 提前5分钟触发，避开整点排队
+    - cron: '58 3 * * *'  # 每天 UTC时间3:58 (北京时间11:58)
+
+  workflow_dispatch:  # 允许手动触发
+    inputs:
+      test_mode:
+        description: '测试模式'
+        required: false
+        default: false
+        type: boolean
+      custom_date:
+        description: '自定义测试日期 (YYYY-MM-DD)'
+        required: false
+        default: ''
+        type: string
+      skip_wait:
+        description: '跳过等待（立即执行）'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  TZ: Asia/Shanghai
+  PYTHON_VERSION: '3.9'
+
+jobs:
+  send-morning-reminder:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        # 不需要安装任何额外包，使用Python标准库
+        
+    - name: Set timezone to Asia/Shanghai
+      run: |
+        sudo timedatectl set-timezone Asia/Shanghai
+        date
+        
+    - name: Run Morning Reminder
+      env:
+        WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+        # 各组成员手机号配置 - 使用GitHub Secrets存储
+        GROUP1_MEMBERS: ${{ secrets.GROUP1_MEMBERS }}
+        GROUP2_MEMBERS: ${{ secrets.GROUP2_MEMBERS }}
+        GROUP3_MEMBERS: ${{ secrets.GROUP3_MEMBERS }}
+        GROUP4_MEMBERS: ${{ secrets.GROUP4_MEMBERS }}
+
+        TEST_MODE: ${{ inputs.test_mode }}
+        TEST_DATE: ${{ inputs.custom_date }}
+        WAIT_ENABLED: ${{ !inputs.skip_wait && 'true' || 'false' }}
+        TARGET_HOUR: '8'
+        TARGET_MINUTE: '59'
+      run: |
+        echo "=== 开始运行早晨提醒脚本 ==="
+        echo "当前时间: $(date)"
+        echo "测试模式: $TEST_MODE"
+        echo "测试日期: $TEST_DATE"
+        echo "等待功能: $WAIT_ENABLED"
+        echo "目标时间: ${TARGET_HOUR}:${TARGET_MINUTE} (北京时间)"
+        echo "WEBHOOK_URL 已设置: $(if [ -n "$WEBHOOK_URL" ]; then echo "是"; else echo "否"; fi)"
+        echo "GROUP1_MEMBERS 长度: $(echo -n "$GROUP1_MEMBERS" | wc -c)"
+        echo "GROUP2_MEMBERS 长度: $(echo -n "$GROUP2_MEMBERS" | wc -c)"
+        echo "GROUP3_MEMBERS 长度: $(echo -n "$GROUP3_MEMBERS" | wc -c)"
+        echo "GROUP4_MEMBERS 长度: $(echo -n "$GROUP4_MEMBERS" | wc -c)"
+        
+        # 运行 Python 脚本
+        python morning.py
+        
+        echo "=== 早晨提醒脚本执行完成 ==="
+        
+    - name: Upload execution logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: morning-execution-${{ github.run_id }}
+        path: morning_output.txt
+        retention-days: 7
