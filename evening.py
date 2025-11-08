@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+import json
+import urllib.request
+from datetime import datetime, timedelta, timezone
+import os
+import sys
+import time
+
+# 设置时区为北京时间
+os.environ['TZ'] = 'Asia/Shanghai'
+
+# ========== 配置区域开始 ==========
+# 企业微信群webhook地址 - 从环境变量获取
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+
+# 测试模式 - 从环境变量获取，正确处理布尔值
+TEST_MODE_STR = os.getenv('TEST_MODE', 'false')
+TEST_MODE = TEST_MODE_STR.lower() == 'true'
+
+# 测试日期 - 支持从环境变量获取自定义测试日期
+CUSTOM_TEST_DATE = os.getenv('TEST_DATE')
+if CUSTOM_TEST_DATE and CUSTOM_TEST_DATE.strip():
+    TEST_DATE = CUSTOM_TEST_DATE.strip()
+else:
+    TEST_DATE = "2025-11-04"  # 默认测试日期
+
+# 新增等待配置
+WAIT_ENABLED = os.getenv('WAIT_ENABLED', 'true').lower() == 'true'
+TARGET_HOUR = int(os.getenv('TARGET_HOUR', '8'))      # 目标小时
+TARGET_MINUTE = int(os.getenv('TARGET_MINUTE', '0')) # 目标分钟
+
+# 北京时区偏移 (UTC+8)
+BEIJING_OFFSET = timedelta(hours=8)
+BEIJING_TZ = timezone(BEIJING_OFFSET)
+
+# 从环境变量获取各组成员手机号
+def get_group_members_from_env():
+    """从环境变量获取各组成员手机号配置"""
+    groups = {}
+    for i in range(1, 5):  # group1 到 group4
+        env_var_name = f"GROUP{i}_MEMBERS"
+        members_str = os.getenv(env_var_name, "")
+
+        if members_str:
+            # 支持逗号分隔的手机号
+            members = [phone.strip() for phone in members_str.split(',') if phone.strip()]
+            groups[f"group{i}"] = members
+            print(f"从环境变量加载 group{i}: {len(members)} 个成员")
+        else:
+            groups[f"group{i}"] = []
+            print(f"警告: 环境变量 {env_var_name} 未设置")
+
+    return groups
+
+# 获取各组成员手机号配置
+GROUP_MEMBERS = get_group_members_from_env()
+
+print(f"=== 调试信息 ===")
+print(f"WEBHOOK_URL: {'已设置' if WEBHOOK_URL and WEBHOOK_URL != '你的webhook_url' else '未设置'}")
+print(f"TEST_MODE: {TEST_MODE}")
+print(f"TEST_DATE: {TEST_DATE}")
+print(f"WAIT_ENABLED: {WAIT_ENABLED}")
+print(f"TARGET_TIME: {TARGET_HOUR:02d}:{TARGET_MINUTE:02d} (北京时间)")
+print(f"各组成员数: group1={len(GROUP_MEMBERS.get('group1', []))}, "
+      f"group2={len(GROUP_MEMBERS.get('group2', []))}, "
+      f"group3={len(GROUP_MEMBERS.get('group3', []))}, "
+      f"group4={len(GROUP_MEMBERS.get('group4', []))}")
+print(f"=================")
+
+# 轮班顺序
+SHIFT_SCHEDULE = ["group1", "group2", "group3", "group4"]
+
+# 轮班开始日期
+SHIFT_START_DATE = "2024-01-01"
+# ========== 配置区域结束 ==========
+
+
+class TimeWaiter:
+    """时间等待器（使用标准库）"""
+
+    def wait_until_target_time(self, target_hour, target_minute=0):
+        """
+        等待直到目标时间（北京时间）
+        """
+        if not WAIT_ENABLED:
+            print("等待功能已禁用，立即执行")
+            return
+
+        if TEST_MODE:
+            print("测试模式下跳过等待")
+            return
+
+        print(f"=== 开始等待目标时间 {target_hour:02d}:{target_minute:02d} ===")
+
+        # 获取当前UTC时间并转换为北京时间
+        utc_now = datetime.now(timezone.utc)
+        beijing_now = utc_now.astimezone(BEIJING_TZ)
+
+        # 构建目标时间（北京时间今天）
+        target_time = datetime(
+            beijing_now.year, beijing_now.month, beijing_now.day,
+            target_hour, target_minute, 0, tzinfo=BEIJING_TZ
+        )
+
+        # 如果当前时间已经超过目标时间，立即执行而不等待
+        if beijing_now >= target_time:
+            print("当前时间已超过或等于目标时间，立即执行！")
+            return
+
+        # 计算需要等待的秒数
+        wait_seconds = (target_time - beijing_now).total_seconds()
+
+        print(f"当前时间(北京): {beijing_now.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"目标时间(北京): {target_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"需要等待: {wait_seconds:.0f} 秒")
+
+        # 如果不需要等待（已经超过目标时间）
+        if wait_seconds <= 0:
+            print("到达目标时间，开始执行任务！")
+            return
+
+        # 分段等待，最长等待60秒然后检查
+        while wait_seconds > 0:
+            sleep_time = min(60, max(1, wait_seconds))
+            print(f"等待 {sleep_time:.0f} 秒...")
+            time.sleep(sleep_time)
+            wait_seconds -= sleep_time
+
+            # 更新当前时间
+            utc_now = datetime.now(timezone.utc)
+            beijing_now = utc_now.astimezone(BEIJING_TZ)
+            print(f"当前时间(北京): {beijing_now.strftime('%Y-%m-%d %H:%M:%S')}")
+
+            if wait_seconds <= 0:
+                print("到达目标时间，开始执行任务！")
+                break
+
+
+class WeChatMessenger:
+    """企业微信消息发送器"""
+
+    def __init__(self, webhook_url):
+        self.webhook_url = webhook_url
+
+    def send_message(self, content, mention_mobiles=None):
+        """发送消息到企业微信"""
+        data = {
+            "msgtype": "text",
+            "text": {
+                "content": content,
+                "mentioned_mobile_list": mention_mobiles if mention_mobiles else []
+            }
+        }
+
+        print(f"准备发送消息，内容长度: {len(content)}")
+        if mention_mobiles:
+            print(f"将@以下成员: {mention_mobiles}")
+        else:
+            print("不@任何成员")
+
+        try:
+            req = urllib.request.Request(
+                url=self.webhook_url,
+                data=json.dumps(data).encode('utf-8'),
+                headers={'Content-Type': 'application/json'}
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                response_data = response.read().decode('utf-8')
+                result = json.loads(response_data)
+                print(f"消息发送结果: {result}")
+                return result
+        except Exception as e:
+            error_msg = f"发送消息时出错: {str(e)}"
+            print(error_msg)
+            return {"error": error_msg}
+
+
+class ShiftManager:
+    """班次管理器"""
+
+    def __init__(self, shift_schedule, start_date):
+        self.shift_schedule = shift_schedule
+        self.start_date = datetime.strptime(start_date, "%Y-%m-%d")
+
+    def get_current_shift_group(self, current_date):
+        """计算今天值班的组"""
+        # 确保日期对象是朴素的（无时区）用于计算
+        if current_date.tzinfo is not None:
+            current_date_naive = current_date.replace(tzinfo=None)
+        else:
+            current_date_naive = current_date
+
+        days_passed = (current_date_naive - self.start_date).days
+        shift_index = days_passed % len(self.shift_schedule)
+        return self.shift_schedule[shift_index]
+
+    def get_group_members(self, group_name):
+        """获取全组成员手机号 - 从环境变量配置中获取"""
+        return GROUP_MEMBERS.get(group_name, [])
+
+
+class DateCalculator:
+    """日期计算器"""
+
+    def get_closest_monday_to_date(self, current_date, target_day):
+        """找到最接近指定日期的周一"""
+        # 使用朴素日期进行计算
+        if current_date.tzinfo is not None:
+            current_date_naive = current_date.replace(tzinfo=None)
+        else:
+            current_date_naive = current_date
+
+        try:
+            target_date = datetime(current_date_naive.year, current_date_naive.month, target_day)
+            days_since_monday = target_date.weekday()
+            closest_monday = target_date - timedelta(days=days_since_monday)
+
+            if abs((closest_monday - target_date).days) > 3:
+                if closest_monday < target_date:
+                    next_monday = closest_monday + timedelta(days=7)
+                    if abs((next_monday - target_date).days) < abs((closest_monday - target_date).days):
+                        return next_monday
+                else:
+                    prev_monday = closest_monday - timedelta(days=7)
+                    if abs((prev_monday - target_date).days) < abs((closest_monday - target_date).days):
+                        return prev_monday
+
+            return closest_monday
+        except ValueError:
+            # 如果目标日期无效（如2月30日），返回当前日期最近的周一
+            return current_date_naive - timedelta(days=current_date_naive.weekday())
+
+    def is_closest_monday_to_14_or_28(self, current_date):
+        """判断今天是否是最接近14或28日的周一"""
+        # 使用朴素日期进行计算
+        if current_date.tzinfo is not None:
+            current_date_naive = current_date.replace(tzinfo=None)
+        else:
+            current_date_naive = current_date
+
+        if current_date_naive.weekday() != 0:  # 不是周一
+            return False
+
+        try:
+            closest_monday_14 = self.get_closest_monday_to_date(current_date_naive, 14)
+            closest_monday_28 = self.get_closest_monday_to_date(current_date_naive, 28)
+
+            return (current_date_naive.date() == closest_monday_14.date() or 
+                    current_date_naive.date() == closest_monday_28.date())
+        except:
+            return False
+
+
+class TaskManager:
+    """任务管理器"""
+
+    def __init__(self, date_calculator):
+        self.date_calculator = date_calculator
+
+    def get_daily_tasks(self):
+        """获取每日任务"""
+        return [
+            "晨会签字录音",
+            "防火巡查",
+            "外电源巡查",
+            "工单完工确认"
+        ]
+
+    def get_weekly_tasks(self, current_date):
+        """获取每周任务"""
+        tasks = []
+        # 使用朴素日期进行计算
+        if current_date.tzinfo is not None:
+            current_date_naive = current_date.replace(tzinfo=None)
+        else:
+            current_date_naive = current_date
+
+        weekday = current_date_naive.weekday()
+
+        if weekday == 0:  # 周一
+            tasks.append("周巡")
+            tasks.append("隐患提报")
+
+            if self.date_calculator.is_closest_monday_to_14_or_28(current_date_naive):
+                tasks.append("电气火灾巡查")
+
+        return tasks
+
+    def get_monthly_tasks(self, current_date):
+        """获取每月任务"""
+        tasks = []
+        # 使用朴素日期进行计算
+        if current_date.tzinfo is not None:
+            current_date_naive = current_date.replace(tzinfo=None)
+        else:
+            current_date_naive = current_date
+
+        day_of_month = current_date_naive.day
+
+        if day_of_month == 20:
+            tasks.append("灭火器巡查")
+
+        return tasks
+
+
+class MorningMessageComposer:
+    """早晨消息组装器"""
+
+    def __init__(self, shift_manager):
+        self.shift_manager = shift_manager
+
+    def compose_message(self, current_date, daily_tasks, weekly_tasks, monthly_tasks):
+        """组装早晨消息内容"""
+        # 格式化日期显示（不带时区信息）
+        if current_date.tzinfo is not None:
+            display_date = current_date.astimezone(BEIJING_TZ)
+        else:
+            display_date = current_date
+
+        title = f"Github定时延迟版工作提醒 {display_date.strftime('%m月%d日')}"
+
+        if TEST_MODE:
+            title += " [测试模式]"
+
+        content = f"{title}\n\n"
+
+        if weekly_tasks:
+            content += "本周任务:\n"
+            for task in weekly_tasks:
+                content += f"• {task}\n"
+            content += "\n"
+
+        if monthly_tasks:
+            content += "本月任务:\n"
+            for task in monthly_tasks:
+                content += f"• {task}\n"
+            content += "\n"
+
+        if daily_tasks:
+            content += "今日任务:\n"
+            for task in daily_tasks:
+                content += f"• {task}\n"
+
+        current_group = self.shift_manager.get_current_shift_group(current_date)
+        mention_mobiles = self.shift_manager.get_group_members(current_group)
+
+        return content, mention_mobiles
+
+
+class MorningReminder:
+    """早晨提醒控制器"""
+
+    def __init__(self, webhook_url, shift_schedule, shift_start_date):
+        self.messenger = WeChatMessenger(webhook_url)
+        self.shift_manager = ShiftManager(shift_schedule, shift_start_date)
+        self.date_calculator = DateCalculator()
+        self.task_manager = TaskManager(self.date_calculator)
+        self.message_composer = MorningMessageComposer(self.shift_manager)
+        self.time_waiter = TimeWaiter()
+
+    def get_current_date(self):
+        """获取当前日期"""
+        if TEST_MODE:
+            # 测试模式下，将无时区日期转换为北京时区
+            naive_date = datetime.strptime(TEST_DATE, "%Y-%m-%d")
+            # 假设测试日期是北京时间
+            date = naive_date.replace(tzinfo=BEIJING_TZ)
+            print(f"测试模式: 使用指定日期 {TEST_DATE}")
+            return date
+        else:
+            # 生产模式下获取当前北京时间
+            utc_now = datetime.now(timezone.utc)
+            date = utc_now.astimezone(BEIJING_TZ)
+            print(f"生产模式: 使用当前日期 {date.strftime('%Y-%m-%d %H:%M:%S')}")
+            return date
+
+    def send_morning_reminder(self):
+        """发送早晨提醒"""
+        print("早晨提醒函数开始执行")
+
+        # 检查必要的环境变量
+        if not WEBHOOK_URL or WEBHOOK_URL == '你的webhook_url':
+            error_msg = "错误: WEBHOOK_URL 环境变量未设置或为默认值"
+            print(error_msg)
+            return {"status": "error", "message": error_msg}
+
+        # 等待到目标时间
+        self.time_waiter.wait_until_target_time(TARGET_HOUR, TARGET_MINUTE)
+        print("=== 等待完成，开始执行任务 ===\n")
+
+        # 获取当前日期
+        current_date = self.get_current_date()
+        print(f"最终使用的日期: {current_date.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # 获取任务列表
+        daily_tasks = self.task_manager.get_daily_tasks()
+        weekly_tasks = self.task_manager.get_weekly_tasks(current_date)
+        monthly_tasks = self.task_manager.get_monthly_tasks(current_date)
+
+        print(f"日常任务: {daily_tasks}")
+        print(f"周任务: {weekly_tasks}")
+        print(f"月任务: {monthly_tasks}")
+
+        # 组装消息
+        content, mention_mobiles = self.message_composer.compose_message(
+            current_date, daily_tasks, weekly_tasks, monthly_tasks
+        )
+
+        print(f"消息内容预览:\n{content}")
+
+        # 发送消息
+        result = self.messenger.send_message(content, mention_mobiles)
+
+        # 返回结果
+        final_result = {
+            "status": "success",
+            "reminder_type": "morning",
+            "date": current_date.strftime('%Y-%m-%d'),
+            "group": self.shift_manager.get_current_shift_group(current_date),
+            "tasks": daily_tasks + weekly_tasks + monthly_tasks,
+            "mention_used": bool(mention_mobiles),
+            "result": result
+        }
+
+        print(f"早晨提醒执行完成")
+        return final_result
+
+
+def main_handler(event, context):
+    """主函数 - 适用于多种环境"""
+    print("接收到触发器事件")
+
+    # 创建控制器实例
+    controller = MorningReminder(WEBHOOK_URL, SHIFT_SCHEDULE, SHIFT_START_DATE)
+
+    # 发送提醒
+    return controller.send_morning_reminder()
+
+
+def main():
+    """本地测试主函数"""
+    print("开始本地测试...")
+    result = main_handler({}, {})
+    print("早晨提醒测试结果:")
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    # 在 GitHub Actions 中，直接调用 main_handler
+    if 'GITHUB_ACTIONS' in os.environ:
+        result = main_handler({}, {})
+        # 将结果写入文件，便于 GitHub Actions 捕获
+        with open('morning_reminder_output.txt', 'w', encoding='utf-8') as f:
+            f.write(json.dumps(result, ensure_ascii=False, indent=2))
+        if result.get('status') == 'error':
+            sys.exit(1)
+    else:
+        main()
