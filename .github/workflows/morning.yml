@@ -62,8 +62,8 @@ jobs:
         TEST_MODE: ${{ inputs.test_mode }}
         TEST_DATE: ${{ inputs.custom_date }}
         WAIT_ENABLED: ${{ !inputs.skip_wait && 'true' || 'false' }}
-        TARGET_HOUR: '8'
-        TARGET_MINUTE: '59'
+        TARGET_HOUR: '9'
+        TARGET_MINUTE: '0'
       run: |
         echo "=== 开始运行早晨提醒脚本 ==="
         echo "当前时间: $(date)"
